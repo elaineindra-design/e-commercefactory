@@ -12,19 +12,17 @@ The starter requester password is `requester123`. Override it with `REQUESTER_PA
 
 ## Shared data
 
-The app supports Upstash Redis using REST environment variables. This is the recommended Vercel setup because requester and factory need to see the same records.
+The app uses Supabase as the shared source of truth so Requester and Factory can work on the same production records across different devices. The browser polls the shared API about every 2 seconds and automatically applies remote changes when the user is not actively editing.
 
-Set either:
+Set this server-only variable in Vercel:
 
-- `UPSTASH_REDIS_REST_URL`
-- `UPSTASH_REDIS_REST_TOKEN`
+- `SUPABASE_SECRET_KEY` — use a Supabase secret key (`sb_secret_...`) from Project Settings → API Keys.
 
-or the Vercel/Upstash aliases:
+The Supabase project URL is already configured as a server-side fallback. You may optionally set `SUPABASE_URL=https://clajgzxalhjrtjfccohn.supabase.co`.
 
-- `KV_REST_API_URL`
-- `KV_REST_API_TOKEN`
+The `public.cogs_shared_state` table has Row Level Security enabled and browser roles have no direct table privileges. The secret key must never be exposed as a `NEXT_PUBLIC_` variable.
 
-If Redis is not configured, the app automatically falls back to browser localStorage and displays a warning. Local mode is useful for testing but is **not shared across devices**.
+If Supabase is not configured, the app can still use the older Upstash Redis variables or browser localStorage as a last-resort demo mode.
 
 ## Authentication environment variables
 
@@ -48,8 +46,8 @@ Open http://localhost:3000.
 1. Import this GitHub repository into Vercel.
 2. Framework preset: **Next.js**.
 3. Add `REQUESTER_PASSWORD` and `SESSION_SECRET` in Project Settings → Environment Variables.
-4. Add an Upstash Redis integration/store and make sure its REST URL/token variables are available to the project.
-5. Redeploy after adding variables.
+4. Add `SUPABASE_SECRET_KEY` using the server-only secret key from Supabase Project Settings → API Keys.
+5. Redeploy after adding the variable. The top bar should change from **Local only** to **Live sync**.
 
 ## Permission enforcement
 
