@@ -135,9 +135,13 @@ export default function App() {
   const [loaded, setLoaded] = useState(false);
   const [persistence, setPersistence] = useState("local");
   const [saveError, setSaveError] = useState("");
+  const [syncState, setSyncState] = useState("idle");
   const [view, setView] = useState({ name: "dashboard" });
   const saveTimer = useRef(null);
   const skipNextSave = useRef(false);
+  const dirtyRef = useRef(false);
+  const savingRef = useRef(false);
+  const changeVersionRef = useRef(0);
 
   useEffect(() => {
     try {
@@ -154,6 +158,7 @@ export default function App() {
     skipNextSave.current = true;
     setData(result.data || { prs: [] });
     setPersistence(result.persistence || "local");
+    setSyncState(result.persistence === "remote" ? "synced" : "local");
     setLoaded(true);
     setSaveError("");
   }, [session]);
@@ -187,21 +192,34 @@ export default function App() {
     }
     if (saveTimer.current) clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(async () => {
+      const versionToSave = changeVersionRef.current;
+      savingRef.current = true;
+      setSyncState(persistence === "remote" ? "syncing" : "local");
       try {
         const result = await saveData(data, persistence);
-        if (result?.data && persistence === "remote") {
-          skipNextSave.current = true;
-          setData(result.data);
+        const unchangedSinceSaveStarted = versionToSave === changeVersionRef.current;
+        if (unchangedSinceSaveStarted) {
+          dirtyRef.current = false;
+          if (result?.data && persistence === "remote") {
+            skipNextSave.current = true;
+            setData(result.data);
+          }
         }
+        setSyncState(persistence === "remote" ? "synced" : "local");
         setSaveError("");
       } catch (e) {
+        setSyncState("error");
         setSaveError("Changes could not be saved. Try Refresh, then edit again.");
+      } finally {
+        savingRef.current = false;
       }
-    }, 500);
+    }, 450);
     return () => saveTimer.current && clearTimeout(saveTimer.current);
   }, [data, loaded, persistence, session]);
 
   const updatePr = useCallback((prId, updater) => {
+    dirtyRef.current = true;
+    changeVersionRef.current += 1;
     setData((d) => ({ ...d, prs: d.prs.map((p) => (p.id === prId ? updater(p) : p)) }));
   }, []);
   const updateSku = useCallback((prId, skuId, updater) => {
@@ -209,10 +227,14 @@ export default function App() {
   }, [updatePr]);
 
   const createPr = (pr) => {
+    dirtyRef.current = true;
+    changeVersionRef.current += 1;
     setData((d) => ({ ...d, prs: [pr, ...d.prs] }));
     setView({ name: "dashboard" });
   };
   const deletePr = (prId) => {
+    dirtyRef.current = true;
+    changeVersionRef.current += 1;
     setData((d) => ({ ...d, prs: d.prs.filter((p) => p.id !== prId) }));
     setView({ name: "dashboard" });
   };
@@ -223,6 +245,40 @@ export default function App() {
     setData({ prs: [] });
     setView({ name: "dashboard" });
   };
+
+  useEffect(() => {
+    if (!session || !loaded || persistence !== "remote") return;
+
+    let cancelled = false;
+    const poll = async () => {
+      if (cancelled || dirtyRef.current || savingRef.current || (typeof document !== "undefined" && document.hidden)) return;
+      try {
+        const r = await fetch("/api/data", { cache: "no-store" });
+        if (!r.ok) return;
+        const j = await r.json();
+        if (j.persistence !== "remote" || !j.data) return;
+        setSyncState("synced");
+        setData((current) => {
+          if (JSON.stringify(current) === JSON.stringify(j.data)) return current;
+          skipNextSave.current = true;
+          return j.data;
+        });
+      } catch {
+        // Keep the current screen usable if a background sync check briefly fails.
+      }
+    };
+
+    const timer = setInterval(poll, 2000);
+    const onVisibility = () => { if (!document.hidden) poll(); };
+    document.addEventListener("visibilitychange", onVisibility);
+    poll();
+
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [session, loaded, persistence]);
 
   const currentPr = view.name === "detail" ? data.prs.find((p) => p.id === view.id) : null;
   const role = session?.role;
@@ -238,7 +294,7 @@ export default function App() {
   return (
     <div className="app">
       <style>{CSS}</style>
-      <TopBar session={session} setView={setView} onLogout={logout} onRefresh={refreshData} />
+      <TopBar session={session} setView={setView} onLogout={logout} onRefresh={refreshData} persistence={persistence} syncState={syncState} />
 
       {!loaded ? (
         <div className="wrap"><div className="muted pad">Loading records…</div></div>
@@ -357,7 +413,7 @@ function LoginLanding({ onLogin }) {
 /* =========================================================================
    Top bar
    ========================================================================= */
-function TopBar({ session, setView, onLogout, onRefresh }) {
+function TopBar({ session, setView, onLogout, onRefresh, persistence, syncState }) {
   return (
     <header className="topbar">
       <div className="topbar-inner">
@@ -366,6 +422,10 @@ function TopBar({ session, setView, onLogout, onRefresh }) {
           <span className="brand-name">Production COGS</span>
         </button>
         <div className="topbar-right">
+          <span className={"sync-pill " + (persistence === "remote" ? "sync-live" : "sync-local")}>
+            <span className="sync-dot" />
+            {persistence === "remote" ? (syncState === "syncing" ? "Syncing…" : syncState === "error" ? "Sync issue" : "Live sync") : "Local only"}
+          </span>
           <button className="top-action" onClick={onRefresh}>Refresh</button>
           <div className="signed-user">
             <span className="signed-name">{session.name}</span>
@@ -1350,6 +1410,10 @@ const CSS = `
 .signed-role{font-size:11px;color:#b8c9c1;border-left:1px solid rgba(255,255,255,.16);padding-left:8px}
 .top-action{border:0;background:none;color:rgba(255,255,255,.72);font-size:12px;cursor:pointer;padding:7px 4px}
 .top-action:hover{color:#fff}
+.sync-pill{display:inline-flex;align-items:center;gap:6px;font-size:11px;border:1px solid rgba(255,255,255,.16);border-radius:999px;padding:5px 9px;color:#d6e2dd;white-space:nowrap}
+.sync-dot{width:7px;height:7px;border-radius:50%;background:#9aa8a2;box-shadow:0 0 0 2px rgba(255,255,255,.05)}
+.sync-live .sync-dot{background:#66d39e;box-shadow:0 0 0 3px rgba(102,211,158,.12)}
+.sync-local{color:#c6cec9}
 .role-help{font-size:12px;color:var(--ink-3);background:var(--surface);border:1px solid var(--line);border-radius:999px;padding:7px 11px}
 .banner-bad{background:var(--bad-soft);border-color:#efc5b8;color:var(--bad)}
 .in:disabled{background:var(--surface-3);color:var(--ink-3);cursor:not-allowed;border-color:var(--line-2)}
